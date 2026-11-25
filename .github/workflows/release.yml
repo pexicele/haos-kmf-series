@@ -28,6 +28,9 @@ jobs:
             exit 1
           fi
 
+      - name: Install the only third party import, voluptuous
+        run: python3 -m pip install voluptuous
+
       - name: Run the tests
         run: |
           python3 tests/test_parser.py
