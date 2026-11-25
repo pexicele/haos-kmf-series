@@ -25,6 +25,10 @@ logging.basicConfig(level=logging.CRITICAL)
 A_FRAME = b":A=4810,567,0,421,3986,100,\n"
 C_FRAME = b":C=12,41,\n"
 
+# Capacity the fake module currently stores, tenths of an Ah, updated when
+# the integration writes function 28.
+STORED_CAPACITY = 11000
+
 
 def _install_fake_ha() -> None:
     """Register fakeha under the homeassistant package names."""
@@ -44,6 +48,7 @@ def _install_fake_ha() -> None:
     const = module("homeassistant.const")
     const.PERCENTAGE = fakeha.PERCENTAGE
     const.Platform = fakeha.Platform
+    const.EntityCategory = fakeha.EntityCategory
     for name in (
         "UnitOfTime",
         "UnitOfElectricCurrent",
@@ -96,6 +101,13 @@ def _install_fake_ha() -> None:
         setattr(selector, name, getattr(fakeha, name))
 
     components = module("homeassistant.components")
+    number = module("homeassistant.components.number")
+    number.NumberEntity = fakeha.NumberEntity
+    number.NumberEntityDescription = (  # type: ignore[attr-defined]
+        fakeha.NumberEntityDescription
+    )
+    number.NumberMode = fakeha.NumberMode
+
     sensor = module("homeassistant.components.sensor")
     sensor.SensorDeviceClass = fakeha.SensorDeviceClass
     sensor.SensorEntity = fakeha.SensorEntity
@@ -121,22 +133,35 @@ def _install_fake_ha() -> None:
     helpers.entity_platform = entity_platform
     helpers.selector = selector
     components.sensor = sensor
+    components.number = number
 
 
 async def fake_module(reader, writer) -> None:
-    """Push a frame, then answer :A and :C on request."""
-    writer.write(A_FRAME)
+    """Push frames, answer :A and :C, apply :W28 writes like the meter."""
+    global STORED_CAPACITY
+    writer.write(b":A=4810,567,0,421,3986,%d,\n" % STORED_CAPACITY)
     await writer.drain()
     try:
         while True:
-            request = await reader.read(64)
+            request = await reader.read(128)
             if not request:
                 break
             if b":C" in request:
                 writer.write(C_FRAME)
                 await writer.drain()
             if b":A" in request:
-                writer.write(A_FRAME)
+                writer.write(b":A=4810,567,0,421,3986,%d,\n" % STORED_CAPACITY)
+                await writer.drain()
+            if b":W28=" in request:
+                # Echo the frame back and push the new capacity, the way
+                # the meter answers function 28.
+                parameter = request.split(b"=")[1].split(b",")[-2]
+                STORED_CAPACITY = int(parameter)
+                writer.write(request)
+                await writer.drain()
+                writer.write(
+                    b":A=4810,567,0,421,3986,%d,\n" % STORED_CAPACITY
+                )
                 await writer.drain()
     except (ConnectionError, asyncio.CancelledError):
         pass
@@ -155,10 +180,13 @@ async def main() -> int:
 
     integration = _loader.load("__init__")
     sensor_platform = _loader.load("sensor")
+    number_platform = _loader.load("number")
     config_flow_module = _loader.load("config_flow")
 
     hass = fakeha.HomeAssistant()
-    fakeha.install(hass, {"sensor": sensor_platform})
+    fakeha.install(
+        hass, {"sensor": sensor_platform, "number": number_platform}
+    )
 
     server = await asyncio.start_server(fake_module, "127.0.0.1", 0)
     port = server.sockets[0].getsockname()[1]
@@ -233,20 +261,21 @@ async def main() -> int:
                 break
         entities = entity_map()
         report(
-            "10 sensors created",
-            len(entities) == 10,
+            "10 sensors + 1 number created",
+            len(entities) == 11,
             f"{len(entities)} created",
         )
 
         for entity in fakeha.collect_entities():
             await entity.async_added_to_hass()
-            await entity.async_write_ha_state()
+            entity.async_write_ha_state()
 
         expected = {
             "127.0.0.1_voltage": 48.1,
             "127.0.0.1_current": -0.567,
             "127.0.0.1_power": -27.3,
-            "127.0.0.1_soc": 39.9,
+            # 3.986 Ah left of the 1100 Ah the fake module stores.
+            "127.0.0.1_soc": 0.4,
             "127.0.0.1_status": "discharging",
             "127.0.0.1_energy_charged": 0.012,
             "127.0.0.1_energy_discharged": 0.041,
@@ -267,6 +296,60 @@ async def main() -> int:
             bool(entity and entity.available),
             entity.available if entity else None,
         )
+
+        # --- the capacity number writes through the client ------------
+        number_entity = entities.get("127.0.0.1_set_capacity")
+        report(
+            "capacity number created",
+            number_entity is not None,
+            type(number_entity).__name__ if number_entity else None,
+        )
+        if number_entity is not None:
+            report(
+                "capacity shows the meter value",
+                number_entity.state == 1100.0,
+                number_entity.state,
+            )
+            report(
+                "capacity range is 1..9999",
+                (
+                    number_entity.native_min_value == 1.0
+                    and number_entity.native_max_value == 9999.0
+                ),
+                (
+                    number_entity.native_min_value,
+                    number_entity.native_max_value,
+                ),
+            )
+
+            await number_entity.async_set_value(2000)
+            report(
+                "write 2000 Ah lands on the meter",
+                number_entity.state == 2000.0,
+                number_entity.state,
+            )
+
+            try:
+                await number_entity.async_set_value(0)
+                rejected = False
+            except fakeha.HomeAssistantError:
+                rejected = True
+            report(
+                "write 0 Ah rejected by range",
+                rejected and number_entity.state == 2000.0,
+                (rejected, number_entity.state),
+            )
+
+            try:
+                await number_entity.async_set_value(10000)
+                rejected = False
+            except fakeha.HomeAssistantError:
+                rejected = True
+            report(
+                "write 10000 Ah rejected by range",
+                rejected and number_entity.state == 2000.0,
+                (rejected, number_entity.state),
+            )
 
         # --- losing the device flips availability ----------------------
         await coordinator.shutdown()

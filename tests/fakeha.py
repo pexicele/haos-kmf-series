@@ -68,6 +68,11 @@ class _Enum:
 PERCENTAGE = "%"
 
 
+class EntityCategory:
+    CONFIG = "config"
+    DIAGNOSTIC = "diagnostic"
+
+
 class UnitOfTime:
     MINUTES = "min"
     HOURS = "h"
@@ -91,6 +96,7 @@ class UnitOfPower:
 
 class Platform:
     SENSOR = "sensor"
+    NUMBER = "number"
 
 
 # ---------------------------------------------------------------- exceptions
@@ -224,6 +230,8 @@ class DataUpdateCoordinator(typing.Generic[_DataT]):
             self.last_update_success = False
             raise ConfigEntryNotReady(str(err)) from err
         self.last_update_success = True
+        # HA hands the new data to the entities once a refresh succeeds.
+        self.async_update_listeners()
 
     async def _async_update_data(self):  # pragma: no cover
         raise NotImplementedError
@@ -265,7 +273,8 @@ class Entity:
     def should_poll(self) -> bool:
         return True
 
-    async def async_write_ha_state(self) -> None:
+    def async_write_ha_state(self) -> None:
+        """Sync in HA, so a bare call from a platform is correct."""
         self.state = getattr(self, "native_value", None)
 
     async def async_added_to_hass(self) -> None:
@@ -307,6 +316,7 @@ class DeviceInfo(dict):
 class EntityDescription:
     key: str
     translation_key: str | None = None
+    entity_category: typing.Any = None
     entity_registry_enabled_default: bool = True
     name: typing.Any = None
     icon: str | None = None
@@ -357,6 +367,59 @@ def _collect(entry: ConfigEntry):
         _HASS.created = created
 
     return add_entities
+
+
+# ---------------------------------------------------------------- number
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class NumberEntityDescription(EntityDescription):
+    device_class: typing.Any = None
+    mode: typing.Any = None
+    native_max_value: float | None = None
+    native_min_value: float | None = None
+    native_step: float | None = None
+    native_unit_of_measurement: str | None = None
+
+
+class NumberMode:
+    AUTO = "auto"
+    BOX = "box"
+    SLIDER = "slider"
+
+
+class NumberEntity(Entity):
+    """Number entity stand-in with the range checks HA applies."""
+
+    _attr_native_min_value: float = 0.0
+    _attr_native_max_value: float = 100.0
+    _attr_native_step: float = 1.0
+    _attr_native_unit_of_measurement: str | None = None
+
+    @property
+    def native_value(self) -> float | None:
+        return None
+
+    @property
+    def native_min_value(self) -> float:
+        description = getattr(self, "entity_description", None)
+        if description is not None and description.native_min_value is not None:
+            return description.native_min_value
+        return self._attr_native_min_value
+
+    @property
+    def native_max_value(self) -> float:
+        description = getattr(self, "entity_description", None)
+        if description is not None and description.native_max_value is not None:
+            return description.native_max_value
+        return self._attr_native_max_value
+
+    async def async_set_value(self, value: float) -> None:
+        """Mimic the service wrapper, which rejects an out of range value."""
+        if value < self.native_min_value or value > self.native_max_value:
+            raise HomeAssistantError(f"value {value} is out of range")
+        await self.async_set_native_value(value)
+
+    async def async_set_native_value(self, value: float) -> None:
+        raise NotImplementedError
 
 
 # ---------------------------------------------------------------- selectors

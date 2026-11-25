@@ -53,8 +53,8 @@
       "remaining_capacity": {
         "name": "Capacitate ramasa"
       },
-      "set_capacity": {
-        "name": "Capacitate setata"
+      "reported_capacity": {
+        "name": "Capacitate raportata"
       },
       "time_remaining": {
         "name": "Timp ramas"
@@ -72,6 +72,11 @@
       },
       "energy_discharged": {
         "name": "Energie descarcata"
+      }
+    },
+    "number": {
+      "set_capacity": {
+        "name": "Capacitate setata"
       }
     }
   }

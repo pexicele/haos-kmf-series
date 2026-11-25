@@ -53,8 +53,8 @@
       "remaining_capacity": {
         "name": "Remaining capacity"
       },
-      "set_capacity": {
-        "name": "Set capacity"
+      "reported_capacity": {
+        "name": "Capacity reported"
       },
       "time_remaining": {
         "name": "Time remaining"
@@ -72,6 +72,11 @@
       },
       "energy_discharged": {
         "name": "Energy discharged"
+      }
+    },
+    "number": {
+      "set_capacity": {
+        "name": "Set capacity"
       }
     }
   }

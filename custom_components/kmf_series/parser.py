@@ -14,7 +14,7 @@ Wire format, one frame per line, terminated by LF:
     2 direction      1 = charging, 0 = discharging
     3 time left      minutes
     4 remaining Ah   1/1000 Ah
-    5 set capacity   1/10   Ah
+    5 capacity set   1/10   Ah
     6+ extra fields, seen on some firmware, ignored
 
 :C= fields:
@@ -96,7 +96,9 @@ def parse_a_line(line: str) -> dict[str, Any] | None:
         "power": round(power if charging else -power, 1),
         "time_remaining": minutes_left,
         "remaining_capacity": round(remaining_ah, 3),
-        "set_capacity": round(capacity_ah, 1),
+        # What the meter has stored as its preset capacity. The number
+        # platform writes this value, the sensor below only reports it.
+        "reported_capacity": round(capacity_ah, 1),
         "soc": soc,
         "status": status,
         "charging": charging,

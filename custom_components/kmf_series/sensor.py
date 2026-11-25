@@ -1,4 +1,8 @@
-"""Sensor platform for the KM-F Series integration."""
+"""Sensor platform for the KM-F Series integration.
+
+Read only values. The preset battery capacity is writable too, that one lives
+in the number platform, these two report what the meter says it holds.
+"""
 
 from __future__ import annotations
 
@@ -86,11 +90,11 @@ SENSORS: tuple[KmfcSensorDescription, ...] = (
         entity_registry_enabled_default=True,
     ),
     KmfcSensorDescription(
-        key="set_capacity",
-        translation_key="set_capacity",
-        value_fn=lambda frame: frame.get("set_capacity"),
+        key="reported_capacity",
+        translation_key="reported_capacity",
+        value_fn=lambda frame: frame.get("reported_capacity"),
         native_unit_of_measurement=UNIT_AMPERE_HOUR,
-        entity_registry_enabled_default=False,
+        state_class=SensorStateClass.MEASUREMENT,
     ),
     KmfcSensorDescription(
         key="time_remaining",

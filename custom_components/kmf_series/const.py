@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 DOMAIN = "kmf_series"
-PLATFORMS: list[str] = ["sensor"]
+PLATFORMS: list[str] = ["sensor", "number"]
 
 CONF_HOST = "host"
 CONF_PORT = "port"
@@ -20,3 +20,7 @@ DEVICE_MANUFACTURER = "Junctek"
 DEVICE_MODEL = "KM-F Series"
 
 UNIT_AMPERE_HOUR = "Ah"
+
+# Bounds of the capacity the user may write, in whole ampere hours.
+MIN_CAPACITY = 1
+MAX_CAPACITY = 9999

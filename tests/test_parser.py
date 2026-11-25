@@ -39,7 +39,7 @@ def test_a_frame() -> None:
     check("power signed", frame["power"], -27.3)
     check("time remaining", frame["time_remaining"], 421)
     check("remaining Ah", frame["remaining_capacity"], 3.986)
-    check("set capacity", frame["set_capacity"], 10.0)
+    check("reported capacity", frame["reported_capacity"], 10.0)
     check("soc", frame["soc"], 39.9)
     check("status", frame["status"], "discharging")
     check("charging flag", frame["charging"], False)
@@ -54,7 +54,7 @@ def test_a_frame_charging() -> None:
     # 51.38 V x 4.93 A = 253.3 W
     check("power signed", frame["power"], 253.3)
     check("remaining Ah", frame["remaining_capacity"], 950.453)
-    check("set capacity", frame["set_capacity"], 1250.0)
+    check("reported capacity", frame["reported_capacity"], 1250.0)
     check("soc", frame["soc"], 76.0)
     check("status", frame["status"], "charging")
 

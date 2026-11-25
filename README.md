@@ -24,10 +24,36 @@ Assistant as soon as the device sends them. Nothing goes out to the internet.
 | Energy discharged | kWh | total increasing, from the `:C` frame |
 | Status | - | charging / discharging / idle |
 | Time remaining | min | disabled by default |
-| Set capacity | Ah | disabled by default |
+| Capacity reported | Ah | what the meter says it holds |
 
-The two disabled-by-default sensors can be enabled from **Settings -> Devices
+Time remaining is disabled by default, enable it from **Settings -> Devices
 and Services -> KM-F Series -> Manage**.
+
+## Setting the battery capacity
+
+The device carries one writable value, the preset battery capacity, and the
+integration exposes it as a **Set capacity** number entity on the same device.
+It is a text box that takes whole ampere-hours from **1 to 9999**, nothing
+else; anything outside that range is refused before it reaches the network.
+
+Type the capacity of your battery and press enter. The integration writes the
+value, waits for the module to echo it back, then refreshes so **Set
+capacity** and **Capacity reported** settle on the stored number. If the
+module does not confirm, the entity keeps the old value and the UI reports
+the failure instead of pretending the write worked.
+
+Two things to know before a write fails:
+
+- The module only accepts commands while its **Monitor function** (setting
+  21 on the meter) is switched on. That is the same switch the vendor app
+  flips when it writes a setting, so if the app can write, Home Assistant
+  can too.
+- The module serves **one client at a time**. If the vendor app or another
+  reader holds the connection, the write has nothing to go out on.
+
+**Capacity reported** is what the meter pushes in its `:A` frame, so it is
+the proof the new capacity actually landed. After a write the two should read
+the same, apart from rounding to whole ampere-hours.
 
 Interface strings ship in English and Romanian. Romanian is picked up when
 Home Assistant runs in `ro`; anything else falls back to English.
@@ -135,11 +161,28 @@ Sending `:A\n` asks for one measurement frame, `:C\n` for the counters. The
 integration uses `:A\n` as a keep alive when the module goes quiet and `:C\n`
 on the configured interval.
 
+Writes use a third frame type, `:W`, and that is CRLF terminated:
+
+```
+:W28=1,216,2000,\r\n     -> battery capacity set to 200.0 Ah
+  ^^  ^^^ ^^^^  ^^^^
+  ||  ||  ||    +-- parameter, tenths of an Ah
+  ||  ||  +-------- checksum of the parameter, (parameter mod 255) + 1
+  ||  +----------- meter address, 1 by default
+  +--------------- function 28, set battery capacity
+```
+
+Firmware answers function 28 in one of two shapes, a return code of `0` in
+the second field, or a repeat of the command line. The integration accepts
+either and treats anything else as a failed write. Field 5 of the `:A` frame
+reports the stored capacity back, which is where **Capacity reported** comes
+from.
+
 ## Development
 
 ```
 python3 tests/test_parser.py       # frame parsing
-python3 tests/test_client.py       # client against a fake module
+python3 tests/test_client.py       # client, writes, fake module
 python3 tests/test_integration.py  # full lifecycle against a fake HA
 ```
 
@@ -149,7 +192,9 @@ against a plain CPython with a stand-in for the Home Assistant API.
 ## Credits
 
 The frame layout was worked out from the public KM-F reports and from
-`Barlows/ha-addon-km140f` (MIT).
+`Barlows/ha-addon-km140f` (MIT). The write frames, function numbers and the
+checksum rule come from the Juntek KG-F manual and from the community
+code of pljakobs/JuncTek_Batterymonitor.
 
 ## License
 
