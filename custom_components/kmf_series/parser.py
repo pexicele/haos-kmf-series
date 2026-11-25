@@ -96,8 +96,8 @@ def parse_a_line(line: str) -> dict[str, Any] | None:
         "power": round(power if charging else -power, 1),
         "time_remaining": minutes_left,
         "remaining_capacity": round(remaining_ah, 3),
-        # What the meter has stored as its preset capacity. The number
-        # platform writes this value, the sensor below only reports it.
+        # What the meter has stored as its preset capacity. Read only
+        # here: the setting itself lives on the device.
         "reported_capacity": round(capacity_ah, 1),
         "soc": soc,
         "status": status,

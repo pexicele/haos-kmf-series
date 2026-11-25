@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 DOMAIN = "kmf_series"
-PLATFORMS: list[str] = ["sensor", "number"]
+PLATFORMS: list[str] = ["sensor"]
 
 CONF_HOST = "host"
 CONF_PORT = "port"
@@ -21,6 +21,8 @@ DEVICE_MODEL = "KM-F Series"
 
 UNIT_AMPERE_HOUR = "Ah"
 
-# Bounds of the capacity the user may write, in whole ampere hours.
-MIN_CAPACITY = 1
-MAX_CAPACITY = 9999
+# The part of the unique id the capacity entities used, up to and including
+# version 2.1.0 as a sensor and 2.1.1 to 2.1.3 as a number. Neither is
+# created any more; the unique id is only kept so their registry entries can
+# be removed on upgrade.
+LEGACY_CAPACITY_KEY = "set_capacity"

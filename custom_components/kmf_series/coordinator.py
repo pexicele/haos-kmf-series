@@ -19,10 +19,7 @@ from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import (
-    ConfigEntryNotReady,
-    HomeAssistantError,
-)
+from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers.update_coordinator import (
     DataUpdateCoordinator,
     UpdateFailed,
@@ -32,7 +29,6 @@ from .client import (
     DEFAULT_PORT,
     KmfcClient,
     KmfcConnectionError,
-    KmfcError,
 )
 from .const import (
     CONF_HOST,
@@ -132,23 +128,6 @@ class KmfcCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             _LOGGER.debug("KM-F stream ended for %s: %s", self.host, err)
         self.available = False
         self.async_update_listeners()
-
-    async def async_set_capacity(self, capacity: int) -> str:
-        """Write the preset battery capacity, Ah, and wait for the reply.
-
-        Raises HomeAssistantError with the device's behaviour in the message
-        when the module does not confirm the new value.
-        """
-        try:
-            reply = await self._client.set_capacity(capacity)
-        except KmfcError as err:
-            _LOGGER.warning("KM-F capacity write rejected for %s: %s",
-                            self.host, err)
-            raise HomeAssistantError(str(err)) from err
-        # The module pushes a fresh :A= frame after a setting change; ask
-        # for one so the entities settle on the stored value quickly.
-        await self.async_request_refresh()
-        return reply
 
     async def shutdown(self) -> None:
         """Stop the reader when the entry is unloaded or removed."""

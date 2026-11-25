@@ -2,7 +2,9 @@
 
 Drives the real integration modules -- __init__, coordinator, sensor and
 config_flow -- against a simulated KM-F module on localhost, with the fake
-HA from fakeha.py standing in for the platform:
+HA from fakeha.py standing in for the platform. The registry cleanup that
+runs on setup is exercised too, against entries an older release left
+behind:
 
     python3 tests/test_integration.py
 
@@ -25,9 +27,13 @@ logging.basicConfig(level=logging.CRITICAL)
 A_FRAME = b":A=4810,567,0,421,3986,100,\n"
 C_FRAME = b":C=12,41,\n"
 
-# Capacity the fake module currently stores, tenths of an Ah, updated when
-# the integration writes function 28.
+# Capacity the fake module stores, tenths of an Ah, in the :A frame. The
+# integration only reads it, the setting itself is changed on the meter.
 STORED_CAPACITY = 11000
+
+# Every line the integration sent during the run. The release that removed
+# the capacity setting must send no write frame at all.
+SEEN_REQUESTS: list[bytes] = []
 
 
 def _install_fake_ha() -> None:
@@ -91,6 +97,15 @@ def _install_fake_ha() -> None:
     entity_platform = module("homeassistant.helpers.entity_platform")
     entity_platform.AddEntitiesCallback = object  # type: ignore[attr-defined]
 
+    entity_registry = module("homeassistant.helpers.entity_registry")
+    # The calls the integration reaches the registry through.
+    entity_registry.async_get = (  # type: ignore[attr-defined]
+        fakeha.async_get_entity_registry
+    )
+    entity_registry.async_entries_for_config_entry = (  # type: ignore
+        fakeha.async_entries_for_config_entry
+    )
+
     selector = module("homeassistant.helpers.selector")
     for name in (
         "NumberSelector",
@@ -101,13 +116,6 @@ def _install_fake_ha() -> None:
         setattr(selector, name, getattr(fakeha, name))
 
     components = module("homeassistant.components")
-    number = module("homeassistant.components.number")
-    number.NumberEntity = fakeha.NumberEntity
-    number.NumberEntityDescription = (  # type: ignore[attr-defined]
-        fakeha.NumberEntityDescription
-    )
-    number.NumberMode = fakeha.NumberMode
-
     sensor = module("homeassistant.components.sensor")
     sensor.SensorDeviceClass = fakeha.SensorDeviceClass
     sensor.SensorEntity = fakeha.SensorEntity
@@ -131,13 +139,13 @@ def _install_fake_ha() -> None:
     helpers.update_coordinator = update_coordinator
     helpers.device_registry = device_registry
     helpers.entity_platform = entity_platform
+    helpers.entity_registry = entity_registry
     helpers.selector = selector
     components.sensor = sensor
-    components.number = number
 
 
 async def fake_module(reader, writer) -> None:
-    """Push frames, answer :A and :C, apply :W28 writes like the meter."""
+    """Push frames and answer the :A and :C requests, nothing else."""
     global STORED_CAPACITY
     writer.write(b":A=4810,567,0,421,3986,%d,\n" % STORED_CAPACITY)
     await writer.drain()
@@ -146,23 +154,15 @@ async def fake_module(reader, writer) -> None:
             request = await reader.read(128)
             if not request:
                 break
+            SEEN_REQUESTS.append(request)
             if b":C" in request:
                 writer.write(C_FRAME)
                 await writer.drain()
             if b":A" in request:
                 writer.write(b":A=4810,567,0,421,3986,%d,\n" % STORED_CAPACITY)
                 await writer.drain()
-            if b":W28=" in request:
-                # Echo the frame back and push the new capacity, the way
-                # the meter answers function 28.
-                parameter = request.split(b"=")[1].split(b",")[-2]
-                STORED_CAPACITY = int(parameter)
-                writer.write(request)
-                await writer.drain()
-                writer.write(
-                    b":A=4810,567,0,421,3986,%d,\n" % STORED_CAPACITY
-                )
-                await writer.drain()
+            # No ":W" branch here on purpose. The integration must never
+            # send one, and SEEN_REQUESTS is what proves it.
     except (ConnectionError, asyncio.CancelledError):
         pass
     finally:
@@ -180,13 +180,25 @@ async def main() -> int:
 
     integration = _loader.load("__init__")
     sensor_platform = _loader.load("sensor")
-    number_platform = _loader.load("number")
     config_flow_module = _loader.load("config_flow")
 
     hass = fakeha.HomeAssistant()
-    fakeha.install(
-        hass, {"sensor": sensor_platform, "number": number_platform}
-    )
+    fakeha.install(hass, {"sensor": sensor_platform})
+
+    # What the earlier releases left in the registry: the capacity first as
+    # a disabled sensor (2.1.0), then as a configuration number
+    # (2.1.1 to 2.1.3), and a number under the address the device had before
+    # it was moved. Setup has to take all three out again.
+    registry = hass.entity_registry
+    registry.add("sensor", "kmf_series", "127.0.0.1_set_capacity",
+                 "sensor.kmf_set_capacity", "test-entry")
+    registry.add("number", "kmf_series", "127.0.0.1_set_capacity",
+                 "number.kmf_set_capacity", "test-entry")
+    registry.add("number", "kmf_series", "192.168.1.50_set_capacity",
+                 "number.kmf_set_capacity_old", "test-entry")
+    # A sensor of this entry that has to survive the sweep.
+    registry.add("sensor", "kmf_series", "127.0.0.1_voltage",
+                 "sensor.kmf_voltage", "test-entry")
 
     server = await asyncio.start_server(fake_module, "127.0.0.1", 0)
     port = server.sockets[0].getsockname()[1]
@@ -261,9 +273,42 @@ async def main() -> int:
                 break
         entities = entity_map()
         report(
-            "10 sensors + 1 number created",
-            len(entities) == 11,
+            "10 sensors created, no number",
+            len(entities) == 10 and not any(
+                type(e).__name__ == "KmfcCapacityNumber"
+                for e in fakeha.collect_entities()
+            ),
             f"{len(entities)} created",
+        )
+        report(
+            "no capacity entity in the registry",
+            registry.async_get_entity_id(
+                "number", "kmf_series", "127.0.0.1_set_capacity"
+            )
+            is None
+            and registry.async_get_entity_id(
+                "sensor", "kmf_series", "127.0.0.1_set_capacity"
+            )
+            is None,
+            registry.removed,
+        )
+        report(
+            "left over registry entries removed",
+            sorted(registry.removed)
+            == [
+                "number.kmf_set_capacity",
+                "number.kmf_set_capacity_old",
+                "sensor.kmf_set_capacity",
+            ],
+            registry.removed,
+        )
+        report(
+            "the live sensors are left alone",
+            registry.async_get_entity_id(
+                "sensor", "kmf_series", "127.0.0.1_voltage"
+            )
+            == "sensor.kmf_voltage",
+            sorted(registry.entries),
         )
 
         for entity in fakeha.collect_entities():
@@ -297,59 +342,17 @@ async def main() -> int:
             entity.available if entity else None,
         )
 
-        # --- the capacity number writes through the client ------------
-        number_entity = entities.get("127.0.0.1_set_capacity")
+        # --- nothing is written to the meter ---------------------------
         report(
-            "capacity number created",
-            number_entity is not None,
-            type(number_entity).__name__ if number_entity else None,
+            "no write frame leaves the integration",
+            not any(b":W" in request for request in SEEN_REQUESTS),
+            f"{len(SEEN_REQUESTS)} requests sent, none a write",
         )
-        if number_entity is not None:
-            report(
-                "capacity shows the meter value",
-                number_entity.state == 1100.0,
-                number_entity.state,
-            )
-            report(
-                "capacity range is 1..9999",
-                (
-                    number_entity.native_min_value == 1.0
-                    and number_entity.native_max_value == 9999.0
-                ),
-                (
-                    number_entity.native_min_value,
-                    number_entity.native_max_value,
-                ),
-            )
-
-            await number_entity.async_set_value(2000)
-            report(
-                "write 2000 Ah lands on the meter",
-                number_entity.state == 2000.0,
-                number_entity.state,
-            )
-
-            try:
-                await number_entity.async_set_value(0)
-                rejected = False
-            except fakeha.HomeAssistantError:
-                rejected = True
-            report(
-                "write 0 Ah rejected by range",
-                rejected and number_entity.state == 2000.0,
-                (rejected, number_entity.state),
-            )
-
-            try:
-                await number_entity.async_set_value(10000)
-                rejected = False
-            except fakeha.HomeAssistantError:
-                rejected = True
-            report(
-                "write 10000 Ah rejected by range",
-                rejected and number_entity.state == 2000.0,
-                (rejected, number_entity.state),
-            )
+        report(
+            "reported capacity still reads from the stream",
+            entities["127.0.0.1_reported_capacity"].state == 1100.0,
+            entities["127.0.0.1_reported_capacity"].state,
+        )
 
         # --- losing the device flips availability ----------------------
         await coordinator.shutdown()

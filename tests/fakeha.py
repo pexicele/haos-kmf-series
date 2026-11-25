@@ -43,6 +43,7 @@ class _Harness:
     def __init__(self) -> None:
         self.data: dict = {}
         self.config_entries = _ConfigEntries({})
+        self.entity_registry = EntityRegistry()
         self.is_stopping = False
 
     def async_create_task(self, target, name=None, eager_start=True):
@@ -311,6 +312,77 @@ class DeviceInfo(dict):
     """HA's DeviceInfo is a TypedDict, a plain dict is close enough."""
 
 
+# ------------------------------------------------------- entity_registry
+class RegistryEntry:
+    """The sliver of a registry entry the integration reads back."""
+
+    def __init__(self, entity_id: str, domain: str, platform: str,
+                 unique_id: str, config_entry_id: str | None = None) -> None:
+        self.entity_id = entity_id
+        self.domain = domain
+        self.platform = platform
+        self.unique_id = unique_id
+        self.config_entry_id = config_entry_id
+
+
+class EntityRegistry:
+    """Stand-in for the entity registry store.
+
+    Only the two calls the integration makes are real: look an entry up by
+    its platform and unique id, and remove one. Entries added by a platform
+    are not tracked here, the fake never registers entities.
+    """
+
+    def __init__(self) -> None:
+        self._by_key: dict[tuple[str, str, str], str] = {}
+        self.entries: dict[str, RegistryEntry] = {}
+        self.removed: list[str] = []
+
+    def add(self, domain: str, platform: str, unique_id: str,
+            entity_id: str, config_entry_id: str | None = None) -> None:
+        """Seed an entry the way an earlier release would have left it."""
+        self._by_key[(domain, platform, unique_id)] = entity_id
+        self.entries[entity_id] = RegistryEntry(
+            entity_id, domain, platform, unique_id, config_entry_id
+        )
+
+    def async_entries_for_config_entry(
+        self, config_entry_id: str
+    ) -> list[RegistryEntry]:
+        return [
+            entry
+            for entry in self.entries.values()
+            if entry.config_entry_id == config_entry_id
+        ]
+
+    def async_get_entity_id(
+        self, domain: str, platform: str, unique_id: str
+    ) -> str | None:
+        return self._by_key.get((domain, platform, unique_id))
+
+    def async_remove(self, entity_id: str) -> None:
+        entry = self.entries.pop(entity_id, None)
+        if entry is None:
+            # The real registry accepts the removal of a gone entity.
+            return
+        self._by_key.pop(
+            (entry.domain, entry.platform, entry.unique_id), None
+        )
+        self.removed.append(entity_id)
+
+
+def async_get_entity_registry(hass: _Harness) -> EntityRegistry:
+    """What homeassistant.helpers.entity_registry.async_get returns."""
+    return hass.entity_registry
+
+
+def async_entries_for_config_entry(
+    registry: EntityRegistry, arg: str
+) -> list[RegistryEntry]:
+    """Stand in for the helper of the same name."""
+    return registry.async_entries_for_config_entry(arg)
+
+
 # ---------------------------------------------------------------- sensor
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class EntityDescription:
@@ -367,59 +439,6 @@ def _collect(entry: ConfigEntry):
         _HASS.created = created
 
     return add_entities
-
-
-# ---------------------------------------------------------------- number
-@dataclasses.dataclass(frozen=True, kw_only=True)
-class NumberEntityDescription(EntityDescription):
-    device_class: typing.Any = None
-    mode: typing.Any = None
-    native_max_value: float | None = None
-    native_min_value: float | None = None
-    native_step: float | None = None
-    native_unit_of_measurement: str | None = None
-
-
-class NumberMode:
-    AUTO = "auto"
-    BOX = "box"
-    SLIDER = "slider"
-
-
-class NumberEntity(Entity):
-    """Number entity stand-in with the range checks HA applies."""
-
-    _attr_native_min_value: float = 0.0
-    _attr_native_max_value: float = 100.0
-    _attr_native_step: float = 1.0
-    _attr_native_unit_of_measurement: str | None = None
-
-    @property
-    def native_value(self) -> float | None:
-        return None
-
-    @property
-    def native_min_value(self) -> float:
-        description = getattr(self, "entity_description", None)
-        if description is not None and description.native_min_value is not None:
-            return description.native_min_value
-        return self._attr_native_min_value
-
-    @property
-    def native_max_value(self) -> float:
-        description = getattr(self, "entity_description", None)
-        if description is not None and description.native_max_value is not None:
-            return description.native_max_value
-        return self._attr_native_max_value
-
-    async def async_set_value(self, value: float) -> None:
-        """Mimic the service wrapper, which rejects an out of range value."""
-        if value < self.native_min_value or value > self.native_max_value:
-            raise HomeAssistantError(f"value {value} is out of range")
-        await self.async_set_native_value(value)
-
-    async def async_set_native_value(self, value: float) -> None:
-        raise NotImplementedError
 
 
 # ---------------------------------------------------------------- selectors

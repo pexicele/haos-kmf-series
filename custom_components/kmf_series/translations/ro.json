@@ -73,11 +73,6 @@
       "energy_discharged": {
         "name": "Energie descarcata"
       }
-    },
-    "number": {
-      "set_capacity": {
-        "name": "Capacitate setata"
-      }
     }
   }
 }

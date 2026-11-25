@@ -1,7 +1,8 @@
 """Sensor platform for the KM-F Series integration.
 
-Read only values. The preset battery capacity is writable too, that one lives
-in the number platform, these two report what the meter says it holds.
+Read only values, every one of them taken from what the module pushes. The
+preset battery capacity is a setting of the meter and is changed there; the
+reported capacity sensor shows what the device says it holds.
 """
 
 from __future__ import annotations

@@ -29,37 +29,24 @@ Assistant as soon as the device sends them. Nothing goes out to the internet.
 Time remaining is disabled by default, enable it from **Settings -> Devices
 and Services -> KM-F Series -> Manage**.
 
-## Setting the battery capacity
+## The battery capacity
 
-The device carries one writable value, the preset battery capacity, and the
-integration exposes it as a **Set capacity** number entity on the same device.
-It is a text box that takes whole ampere-hours from **1 to 9999**, nothing
-else; anything outside that range is refused before it reaches the network.
+The integration is read only. The preset battery capacity is a setting of the
+meter, not of Home Assistant, so it is changed on the device: **system
+settings -> AH. preset** on the KM-F itself. Whatever the meter holds shows up
+in **Capacity reported**, which is what the device pushes in its `:A` frame.
 
-Type the capacity of your battery and press enter. The integration writes the
-value, waits for the meter to confirm it by answering the command or by
-reporting the new capacity in its next frame, then refreshes so **Set
-capacity** and **Capacity reported** settle on the stored number. If neither
-happens, the entity keeps the old value and the UI reports the failure instead
-of pretending the write worked.
+Earlier releases (2.1.0 to 2.1.3) exposed a **Set capacity** entity, a
+disabled sensor at first and then a configuration number. Writes never landed
+on the tested units: the network port of the WiFi module forwards readings,
+and the manual documents writes over RS-485 and Bluetooth only, so the
+setting could not be trusted from Home Assistant and the entity had nothing
+useful to show. **Version 2.1.4 removes it.** Setup deletes the leftover
+registry entries of both older shapes, so the stale rows disappear from the
+device page on their own, without a manual clean up.
 
-Three things to know before a write fails:
-
-- The module only accepts commands while its **Monitor function** (setting
-  21 on the meter) is switched on. That is the same switch the vendor app
-  flips when it writes a setting, so if the app can write, Home Assistant
-  can too. It cannot be enabled over the network, only from the meter, and
-  while it is on the display stops refreshing its own readings.
-- The module serves **one client at a time**. If the vendor app or another
-  reader holds the connection, the write has nothing to go out on.
-- Some network bridges only forward readings. A failed write says so
-  outright, in the same message, and tells you to set the capacity on the
-  meter under system settings as **AH. preset**; it lands here in
-  **Capacity reported** a second later.
-
-**Capacity reported** is what the meter pushes in its `:A` frame, so it is
-the proof the new capacity actually landed. After a write the two should read
-the same, apart from rounding to whole ampere-hours.
+Everything read-only is unchanged: the readings, the energy counters and
+**Capacity reported** keep arriving exactly as before.
 
 Interface strings ship in English and Romanian. Romanian is picked up when
 Home Assistant runs in `ro`; anything else falls back to English.
@@ -167,7 +154,8 @@ Sending `:A\n` asks for one measurement frame, `:C\n` for the counters. The
 integration uses `:A\n` as a keep alive when the module goes quiet and `:C\n`
 on the configured interval.
 
-Writes use a third frame type, `:W`, and that is CRLF terminated:
+Writing a parameter uses a third frame type, `:W`, and that one is CRLF
+terminated:
 
 ```
 :W28=1,216,2000,\r\n     -> battery capacity set to 200.0 Ah
@@ -178,38 +166,14 @@ Writes use a third frame type, `:W`, and that is CRLF terminated:
   +--------------- function 28, set battery capacity
 ```
 
-The integration sends that frame with a CRLF terminator, as the manual asks.
-If nothing confirms it, it sends the same frame again terminated with a bare
-LF: CRLF is documented for the RS-485 and Bluetooth links, while the WiFi
-module only ever sends LF itself, and a bridge that splits incoming lines on
-LF alone would find a stray carriage return at the end of the last field and
-can drop the command without a word.
-
-The integration takes either of those replies as confirmation, and it also
-accepts a module that answers nothing at all as long as the next `:A` frame
-reports the new capacity. That read back is the stronger proof of the two, it
-is the same number **Capacity reported** shows, and it covers firmware that
-forwards a write in silence.
-
-When neither proof arrives, the integration sends the capacity the meter
-already reports. That frame changes nothing, the stored setting is the same
-before and after it, but the way the module treats it says which of two
-failures happened, and the error message then names one instead of guessing:
-
-- It answers that frame. The link takes writes and only the requested value
-  went unanswered, so the thing to check is the **Monitor function** at the
-  meter, plus any second client hogging the socket.
-- It stays silent about it too, while its `:A` frames keep arriving. This
-  network port carries readings only. The manual documents writes over RS-485
-  and Bluetooth, and nothing says a network bridge has to forward them, so
-  some modules simply do not. Set the capacity at the meter itself, under
-  system settings as **AH. preset**, and it shows up in **Capacity reported**
-  on the next frame.
-
-The manual never describes this TCP port, and neither the `:A` nor the `:C`
-frame appears in it, so what a given module forwards upstream depends on the
-bridge firmware. The official app is Bluetooth only, which is why it can
-write where this socket cannot.
+The client can build and send these frames, and `tests/test_client.py` drives
+that path against a simulated module, but nothing in the integration sends one
+any more. Releases 2.1.1 to 2.1.3 tried, on a KM-F unit at `192.168.x.x:8899`,
+and the meter never took the write: neither CRLF nor a bare LF drew a reply,
+and the reported capacity never moved, while the `:A` frames kept arriving on
+the same connection. A frame that changes nothing, function 28 with the
+capacity the meter already reports, was met with the same silence, which
+points at a port that carries readings only rather than at a refused value.
 
 One trap worth knowing: protocol function `W21` is the under-voltage
 protection, **not** the Monitor function. The Monitor function is setting 21

@@ -73,11 +73,6 @@
       "energy_discharged": {
         "name": "Energy discharged"
       }
-    },
-    "number": {
-      "set_capacity": {
-        "name": "Set capacity"
-      }
     }
   }
 }
