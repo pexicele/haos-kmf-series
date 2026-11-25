@@ -200,7 +200,14 @@ async def test_set_capacity_round_trip() -> None:
 
 
 async def test_set_capacity_times_out() -> None:
-    """A module that ignores the write is reported as a failure."""
+    """A module that ignores every write says so in the error.
+
+    The fake module pushes its measurements and never answers a command,
+    which is the shape of a network port carrying readings only. The
+    post check write, the capacity the meter already stores, stays
+    unanswered too, so the error must stop pointing at the Monitor
+    function and name the front panel setting instead.
+    """
 
     async def silent(reader, writer):
         writer.write(A_FRAME)
@@ -227,10 +234,122 @@ async def test_set_capacity_times_out() -> None:
             try:
                 await client.set_capacity(300)
             except KmfcWriteError as err:
-                print(f"ok   a silent device raises: {err}")
-                assert "Monitor function" in str(err), err
+                print(f"ok   a deaf link raises: {err}")
+                text = str(err)
+                assert "carries readings only" in text, text
+                assert "AH. preset" in text, text
+                assert "Monitor function" not in text, text
             else:
                 raise AssertionError("set_capacity should have raised")
+        finally:
+            await client.stop()
+            try:
+                await task
+            except (ConnectionError, KmfcConnectionError):
+                pass
+    server.close()
+    await server.wait_closed()
+
+
+async def test_other_writes_answered_blame_the_monitor() -> None:
+    """A module that answers writes but not this one is a setting problem.
+
+    The fake module replies to the check write, the capacity it already
+    reports, while ignoring the requested value, so the meter is
+    reachable and takes commands. That reply is what moves the error
+    message from "this port reads only" to the Monitor function, which
+    is the one thing the user can still change.
+    """
+
+    async def stubborn(reader, writer):
+        stored = 100
+        writer.write(f":A=4810,567,0,421,3986,{stored},\n".encode())
+        await writer.drain()
+        try:
+            while True:
+                request = await reader.readuntil(b"\n")
+                if b":W28=" not in request:
+                    continue
+                parameter = int(request.split(b",")[-2])
+                if parameter == stored:
+                    # the check write, answered like any other command
+                    writer.write(request)
+                    await writer.drain()
+        except (ConnectionError, asyncio.IncompleteReadError):
+            pass
+        finally:
+            writer.close()
+
+    server = await asyncio.start_server(stubborn, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    client = KmfcClient(
+        "127.0.0.1", port, read_timeout=1.0, write_timeout=0.5
+    )
+    async with server:
+        task = asyncio.create_task(client.listen())
+        try:
+            for _ in range(40):
+                await asyncio.sleep(0.05)
+                if client.connected:
+                    break
+            try:
+                await client.set_capacity(300)
+            except KmfcWriteError as err:
+                print(f"ok   a link that writes else raises: {err}")
+                text = str(err)
+                assert "Monitor function" in text, text
+                assert "carries readings only" not in text, text
+            else:
+                raise AssertionError("set_capacity should have raised")
+        finally:
+            await client.stop()
+            try:
+                await task
+            except (ConnectionError, KmfcConnectionError):
+                pass
+    server.close()
+    await server.wait_closed()
+
+
+async def test_lf_only_module_is_retried_without_the_carriage_return() -> None:
+    """A bridge that splits on LF alone ignores a CRLF frame.
+
+    The manual documents CRLF, but that is the RS-485 and Bluetooth link,
+    and the WiFi module itself only ever sends LF. A module that reads
+    lines on LF alone sees a stray carriage return at the end of the last
+    field and can drop the command in silence, so the write is retried
+    with a plain LF.
+    """
+
+    async def lf_only(reader, writer):
+        writer.write(A_FRAME)
+        await writer.drain()
+        stored = 100
+        try:
+            while True:
+                request = await reader.readuntil(b"\n")
+                if b":W28=" in request and not request.endswith(b"\r\n"):
+                    stored = int(request.split(b",")[-2])
+                writer.write(f":A=4810,567,0,421,3986,{stored},\n".encode())
+                await writer.drain()
+        except (ConnectionError, asyncio.IncompleteReadError):
+            pass
+        finally:
+            writer.close()
+
+    server = await asyncio.start_server(lf_only, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    client = KmfcClient("127.0.0.1", port, read_timeout=1.0, write_timeout=3.0)
+    async with server:
+        task = asyncio.create_task(client.listen())
+        try:
+            for _ in range(40):
+                await asyncio.sleep(0.05)
+                if client.connected:
+                    break
+            reply = await client.set_capacity(1100)
+            assert "1100 Ah" in reply, reply
+            print(f"ok   CRLF ignored, the LF retry landed: {reply}")
         finally:
             await client.stop()
             try:

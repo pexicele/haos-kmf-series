@@ -43,14 +43,19 @@ capacity** and **Capacity reported** settle on the stored number. If neither
 happens, the entity keeps the old value and the UI reports the failure instead
 of pretending the write worked.
 
-Two things to know before a write fails:
+Three things to know before a write fails:
 
 - The module only accepts commands while its **Monitor function** (setting
   21 on the meter) is switched on. That is the same switch the vendor app
   flips when it writes a setting, so if the app can write, Home Assistant
-  can too. It cannot be enabled over the network, only from the meter.
+  can too. It cannot be enabled over the network, only from the meter, and
+  while it is on the display stops refreshing its own readings.
 - The module serves **one client at a time**. If the vendor app or another
   reader holds the connection, the write has nothing to go out on.
+- Some network bridges only forward readings. A failed write says so
+  outright, in the same message, and tells you to set the capacity on the
+  meter under system settings as **AH. preset**; it lands here in
+  **Capacity reported** a second later.
 
 **Capacity reported** is what the meter pushes in its `:A` frame, so it is
 the proof the new capacity actually landed. After a write the two should read
@@ -173,17 +178,45 @@ Writes use a third frame type, `:W`, and that is CRLF terminated:
   +--------------- function 28, set battery capacity
 ```
 
+The integration sends that frame with a CRLF terminator, as the manual asks.
+If nothing confirms it, it sends the same frame again terminated with a bare
+LF: CRLF is documented for the RS-485 and Bluetooth links, while the WiFi
+module only ever sends LF itself, and a bridge that splits incoming lines on
+LF alone would find a stray carriage return at the end of the last field and
+can drop the command without a word.
+
 The integration takes either of those replies as confirmation, and it also
 accepts a module that answers nothing at all as long as the next `:A` frame
 reports the new capacity. That read back is the stronger proof of the two, it
 is the same number **Capacity reported** shows, and it covers firmware that
-forwards a write in silence. When neither proof arrives the write is reported
-as failed, and the message quotes the lines the module did send.
+forwards a write in silence.
+
+When neither proof arrives, the integration sends the capacity the meter
+already reports. That frame changes nothing, the stored setting is the same
+before and after it, but the way the module treats it says which of two
+failures happened, and the error message then names one instead of guessing:
+
+- It answers that frame. The link takes writes and only the requested value
+  went unanswered, so the thing to check is the **Monitor function** at the
+  meter, plus any second client hogging the socket.
+- It stays silent about it too, while its `:A` frames keep arriving. This
+  network port carries readings only. The manual documents writes over RS-485
+  and Bluetooth, and nothing says a network bridge has to forward them, so
+  some modules simply do not. Set the capacity at the meter itself, under
+  system settings as **AH. preset**, and it shows up in **Capacity reported**
+  on the next frame.
+
+The manual never describes this TCP port, and neither the `:A` nor the `:C`
+frame appears in it, so what a given module forwards upstream depends on the
+bridge firmware. The official app is Bluetooth only, which is why it can
+write where this socket cannot.
 
 One trap worth knowing: protocol function `W21` is the under-voltage
 protection, **not** the Monitor function. The Monitor function is setting 21
 in the meter's own menu and can only be switched on from the meter's display,
-which is why the integration cannot enable it for you.
+which is why the integration cannot enable it for you. While it is off, the
+meter ignores commands, and switching it on also stops the display from
+updating its readings on its own.
 
 ## Development
 

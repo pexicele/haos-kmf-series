@@ -42,8 +42,18 @@ MIN_ADDRESS = 1
 MAX_ADDRESS = 99
 DEFAULT_ADDRESS = 1
 DEFAULT_WRITE_TIMEOUT = 5.0
+# Long enough for a module to answer the check write, short enough not to
+# double the wait of a failed command, so it is capped by the write timeout.
+DEFAULT_POST_CHECK_TIMEOUT = 4.0
 MAX_DIAGNOSTIC_LINES = 3
 MAX_DIAGNOSTIC_LENGTH = 60
+
+# The manual specifies CRLF, but that is the RS-485 and Bluetooth link. The
+# WiFi module only ever sends LF, and a bridge that splits its incoming
+# lines on LF alone would see a stray carriage return at the end of the
+# last field and drop the command without a word. Both are sent, CRLF
+# first, since that is the documented one.
+WRITE_TERMINATORS = (b"\r\n", b"\n")
 
 READBACK = "readback"
 WRITE_REPLY_RE = re.compile(r"^:[wW](\d{2})=")
@@ -69,19 +79,26 @@ def checksum(parameter: int) -> int:
     return (parameter % 255) + 1
 
 
-def build_write_frame(function: int, address: int, parameter: int) -> bytes:
-    """Build one Juntek write line, CRLF terminated.
+def build_write_frame(
+    function: int,
+    address: int,
+    parameter: int,
+    terminator: bytes = b"\r\n",
+) -> bytes:
+    """Build one Juntek write line.
 
     Layout: SOM, function code W, function number, =, address, comma,
-    checksum, comma, data, comma, CRLF.
+    checksum, comma, data, comma, terminator. The manual asks for CRLF, the
+    TCP bridge itself is only known to speak LF, so both are offered.
     """
-    return (
-        f":W{function:02d}={address},{checksum(parameter)},{parameter},\r\n"
-    ).encode("ascii")
+    head = f":W{function:02d}={address},{checksum(parameter)},{parameter},"
+    return head.encode("ascii") + terminator
 
 
 def build_set_capacity_frame(
-    capacity_ah: int, address: int = DEFAULT_ADDRESS
+    capacity_ah: int,
+    address: int = DEFAULT_ADDRESS,
+    terminator: bytes = b"\r\n",
 ) -> bytes:
     """Build the function 28 frame that sets the battery capacity.
 
@@ -104,7 +121,10 @@ def build_set_capacity_frame(
             f"{MAX_ADDRESS}, got {address}"
         )
     return build_write_frame(
-        SET_CAPACITY_FUNCTION, address, capacity_ah * CAPACITY_PARAM_SCALE
+        SET_CAPACITY_FUNCTION,
+        address,
+        capacity_ah * CAPACITY_PARAM_SCALE,
+        terminator,
     )
 
 
@@ -175,6 +195,7 @@ class KmfcClient:
         self._counters_interval = counters_interval
         self._write_timeout = write_timeout
         self._reply_waiter: asyncio.Future | None = None
+        self._any_write_waiter: asyncio.Future | None = None
         self._frame_event: asyncio.Event | None = None
         self._unparsed: list[str] = []
         self._on_data = on_data
@@ -288,68 +309,157 @@ class KmfcClient:
            and this is the same proof the read only sensor relies on.
 
         Raises KmfcWriteError when the link is down, the meter refuses, or
-        nothing confirms the new value. The message carries whatever the
-        device did say, which is what tells a silent Monitor function apart
-        from a broken frame.
-
-        Raises KmfcWriteError when the link is down, the meter refuses, or
-        nothing confirms the new value. The message carries whatever the
-        device did say, which is what tells a silent Monitor function apart
-        from a broken frame.
+        nothing confirms the new value. The failed write is then probed
+        with a frame that changes nothing, and the answer decides the text:
+        a link that answers writes points at the Monitor function, a link
+        that answers none is a readings only port and says where the value
+        has to be set instead. The unparsed lines are quoted either way.
         """
         writer = self._writer
         if writer is None:
             raise KmfcWriteError(
                 f"No open link to KM-F at {self.host}:{self.port}"
             )
-        frame = build_set_capacity_frame(capacity_ah, address)
         wanted = capacity_ah * CAPACITY_PARAM_SCALE
         already = self._reports_capacity(wanted)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._write_timeout
+        self._unparsed = []
+        frames: list[bytes] = []
+        for index, terminator in enumerate(WRITE_TERMINATORS):
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                break
+            left = len(WRITE_TERMINATORS) - index
+            stop = (
+                deadline if left == 1 else loop.time() + remaining / left
+            )
+            frame = build_set_capacity_frame(
+                capacity_ah, address, terminator
+            )
+            frames.append(frame)
+            kind, detail = await self._write_and_watch(
+                writer, frame, wanted, already, stop
+            )
+            if kind == "refused":
+                raise KmfcWriteError(
+                    f"KM-F at {self.host}:{self.port} refused the "
+                    f"capacity, it answered {detail}"
+                )
+            if kind == "reply":
+                _LOGGER.debug("KM-F accepted %r with %r", frame, detail)
+                return detail
+            if kind == READBACK:
+                confirm = (
+                    f"KM-F at {self.host}:{self.port} confirmed the "
+                    f"capacity by reporting {capacity_ah} Ah back, "
+                    f"without answering {frame!r}"
+                )
+                _LOGGER.debug("%s", confirm)
+                return confirm
+            if already:
+                # The meter held this value before the write, so a
+                # matching frame would prove nothing, and a second
+                # terminator proves nothing either. Nothing to confirm.
+                note = (
+                    f"KM-F at {self.host}:{self.port} already reported "
+                    f"{capacity_ah} Ah and sent no reply to {frame!r}"
+                )
+                _LOGGER.debug("%s", note)
+                return note
+        answered = await self._writes_are_answered()
+        raise KmfcWriteError(
+            self._no_proof_message(frames, capacity_ah, answered)
+        )
+
+    async def _writes_are_answered(self) -> bool:
+        """Ask whether this link answers a ``:W`` command at all.
+
+        Run only after a write has failed. The parameter sent is the
+        capacity the meter reports right now, read back in tenths so the
+        value cannot drift by a rounding step, which leaves the stored
+        setting exactly as it was and makes the frame safe to fire. A
+        reply naming any function means this socket does forward writes
+        and only the requested value went unanswered. Silence, heard
+        while the pushed frames keep arriving on the same connection,
+        means the port carries readings only.
+        """
+        writer = self._writer
+        if writer is None:
+            return False
+        reported = self._last_frame.get("reported_capacity")
+        if reported is None:
+            return False
+        tenths = round(float(reported) * CAPACITY_PARAM_SCALE)
+        limit = MAX_CAPACITY_AH * CAPACITY_PARAM_SCALE
+        if not CAPACITY_PARAM_SCALE <= tenths <= limit:
+            return False
+        loop = asyncio.get_running_loop()
+        waiter: asyncio.Future = loop.create_future()
+        budget = min(DEFAULT_POST_CHECK_TIMEOUT, self._write_timeout)
+        deadline = loop.time() + budget
+        self._any_write_waiter = waiter
+        try:
+            for index, terminator in enumerate(WRITE_TERMINATORS):
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    break
+                left = len(WRITE_TERMINATORS) - index
+                frame = build_write_frame(
+                    SET_CAPACITY_FUNCTION, DEFAULT_ADDRESS, tenths, terminator
+                )
+                try:
+                    await self._send(writer, frame)
+                except ConnectionError as err:
+                    raise KmfcWriteError(str(err)) from err
+                done, _ = await asyncio.wait(
+                    [waiter],
+                    timeout=remaining / left,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if waiter in done:
+                    return True
+        finally:
+            self._any_write_waiter = None
+        return False
+
+    async def _write_and_watch(
+        self,
+        writer: asyncio.StreamWriter,
+        frame: bytes,
+        wanted: int,
+        already: bool,
+        stop: float,
+    ) -> tuple[str | None, str | None]:
+        """Send one write frame and watch for proof until the stop time.
+
+        Returns ``(kind, detail)``: ``("reply", line)`` when the module
+        answered and accepted, ``("refused", line)`` when it answered and
+        did not, ``(READBACK, None)`` when a pushed frame reported the
+        value, and ``(None, None)`` when nothing confirmed in time.
+        """
         loop = asyncio.get_running_loop()
         waiter: asyncio.Future = loop.create_future()
         self._frame_event = asyncio.Event()
         self._reply_waiter = waiter
-        self._unparsed = []
         try:
             try:
                 await self._send(writer, frame)
             except ConnectionError as err:
                 raise KmfcWriteError(str(err)) from err
-            deadline = loop.time() + self._write_timeout
             outcome = await self._wait_for_proof(
-                waiter, wanted, already, deadline
+                waiter, wanted, already, stop
             )
-            if outcome is not None and outcome != READBACK:
-                if not reply_accepted(outcome, wanted):
-                    raise KmfcWriteError(
-                        f"KM-F at {self.host}:{self.port} refused the "
-                        f"capacity, it answered {outcome}"
-                    )
-                _LOGGER.debug("KM-F accepted %r with %r", frame, outcome)
-                return outcome
-            if outcome is None:
-                if already:
-                    # The meter held this value before the write, so a
-                    # matching frame would prove nothing and none came.
-                    note = (
-                        f"KM-F at {self.host}:{self.port} already reported "
-                        f"{capacity_ah} Ah and sent no reply to {frame!r}"
-                    )
-                    _LOGGER.debug("%s", note)
-                    return note
-                raise KmfcWriteError(self._silent_message(frame))
-            confirm = (
-                f"KM-F at {self.host}:{self.port} confirmed the capacity "
-                f"by reporting {capacity_ah} Ah back, without answering "
-                f"{frame!r}"
-            )
-            _LOGGER.debug("%s", confirm)
-            return confirm
-        except asyncio.TimeoutError as err:
-            raise KmfcWriteError(self._silent_message(frame)) from err
         finally:
             self._reply_waiter = None
             self._frame_event = None
+        if outcome is None:
+            return None, None
+        if outcome == READBACK:
+            return READBACK, None
+        if not reply_accepted(outcome, wanted):
+            return "refused", outcome
+        return "reply", outcome
 
     async def _wait_for_proof(
         self,
@@ -397,21 +507,49 @@ class KmfcClient:
             return False
         return round(float(reported) * CAPACITY_PARAM_SCALE) == wanted
 
-    def _silent_message(self, frame: bytes) -> str:
-        """Build the error shown when the meter neither answers nor obeys."""
+    def _no_proof_message(
+        self, frames: list[bytes], capacity_ah: int, answered: bool
+    ) -> str:
+        """Error shown when neither a reply nor a read back arrived.
+
+        ``answered`` comes from _writes_are_answered, so the text can
+        separate the two failures that look identical from the outside.
+        A link that answers other writes has a setting to fix, and the
+        Monitor function is the one that silences commands. A link that
+        answers no write at all is a property of the module, so the
+        message stops sending the user hunting through menus and names
+        the front panel setting that stores the same value.
+        """
+        sent = " or ".join(repr(frame) for frame in frames)
         detail = (
             " The only lines it sent were: " + "; ".join(self._unparsed)
             if self._unparsed
             else ""
         )
-        return (
-            f"KM-F at {self.host}:{self.port} neither answered {frame!r} "
-            f"nor changed the reported capacity within "
-            f"{self._write_timeout:g} s. The meter only accepts commands "
-            f"while its Monitor function is switched on, the same setting "
-            f"the vendor app needs to write, and its WiFi module serves "
-            f"one client at a time, so close that app first. See the "
-            f"KM-F manual, chapter \"Monitor function\".{detail}"
+        head = (
+            f"KM-F at {self.host}:{self.port} did not answer {sent} "
+            f"and did not report {capacity_ah} Ah back within "
+            f"{self._write_timeout:g} s. "
+        )
+        if answered:
+            return head + (
+                "It did answer another write on the same connection, so "
+                "this link takes commands and only this one went "
+                "unanswered. Switch the Monitor function on at the meter, "
+                "under system settings; no protocol command can enable "
+                "it, and while it is off the meter ignores writes. Then "
+                "close the vendor app, since the module serves one TCP "
+                f"client at a time.{detail}"
+            )
+        return head + (
+            "It stayed silent about the capacity it already stores, on "
+            "this connection and on a second one with a different line "
+            "ending, while its measurements kept arriving. This network "
+            "port carries readings only, so the capacity has to be set "
+            "at the meter, under system settings as \"AH. preset\"; it "
+            "shows up here on the next frame. If the vendor app writes "
+            "the capacity for you, its Bluetooth link answers writes "
+            "while this one does not." + detail
         )
 
     def _note_unparsed(self, line: str) -> None:
@@ -432,13 +570,25 @@ class KmfcClient:
             self._unparsed.append(text)
 
     def _dispatch_reply(self, line: str) -> None:
-        """Hand a write reply to whoever is waiting for one."""
+        """Hand a write reply to whoever is waiting for one.
+
+        A reply naming any function also wakes the post check, since it
+        only wants to learn whether this link answers writes at all.
+        """
+        text = line.strip()
+        any_waiter = self._any_write_waiter
+        if (
+            any_waiter is not None
+            and not any_waiter.done()
+            and WRITE_REPLY_RE.match(text) is not None
+        ):
+            any_waiter.set_result(text)
         waiter = self._reply_waiter
         if waiter is None or waiter.done() or not is_reply_for(
-            line, SET_CAPACITY_FUNCTION
+            text, SET_CAPACITY_FUNCTION
         ):
             return
-        waiter.set_result(line.strip())
+        waiter.set_result(text)
 
     async def stop(self) -> None:
         """Break the listen loop without reporting an unexpected drop."""
