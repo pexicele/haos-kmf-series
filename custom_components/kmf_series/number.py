@@ -111,7 +111,12 @@ class KmfcCapacityNumber(CoordinatorEntity[KmfcCoordinator], NumberEntity):
         leaves the old capacity on screen instead of a value the hardware
         does not have.
         """
-        capacity = int(round(value))
+        if not float(value).is_integer():
+            raise HomeAssistantError(
+                f"Capacity must be a whole number of {UNIT_AMPERE_HOUR}, "
+                f"got {value:g}"
+            )
+        capacity = int(value)
         if not MIN_CAPACITY <= capacity <= MAX_CAPACITY:
             raise HomeAssistantError(
                 f"Capacity must be between {MIN_CAPACITY} and "
