@@ -37,17 +37,18 @@ It is a text box that takes whole ampere-hours from **1 to 9999**, nothing
 else; anything outside that range is refused before it reaches the network.
 
 Type the capacity of your battery and press enter. The integration writes the
-value, waits for the module to echo it back, then refreshes so **Set
-capacity** and **Capacity reported** settle on the stored number. If the
-module does not confirm, the entity keeps the old value and the UI reports
-the failure instead of pretending the write worked.
+value, waits for the meter to confirm it by answering the command or by
+reporting the new capacity in its next frame, then refreshes so **Set
+capacity** and **Capacity reported** settle on the stored number. If neither
+happens, the entity keeps the old value and the UI reports the failure instead
+of pretending the write worked.
 
 Two things to know before a write fails:
 
 - The module only accepts commands while its **Monitor function** (setting
   21 on the meter) is switched on. That is the same switch the vendor app
   flips when it writes a setting, so if the app can write, Home Assistant
-  can too.
+  can too. It cannot be enabled over the network, only from the meter.
 - The module serves **one client at a time**. If the vendor app or another
   reader holds the connection, the write has nothing to go out on.
 
@@ -145,7 +146,7 @@ Plain ASCII over TCP on port `8899`, one line per frame, LF terminated.
 | 2 | Direction, 1 charging, 0 discharging | - |
 | 3 | Minutes remaining | minutes |
 | 4 | Remaining capacity | /1000 -> Ah |
-| 5 | Set capacity | /10 -> Ah |
+| 5 | Reported capacity | /10 -> Ah |
 | 6+ | Firmware specific, ignored | - |
 
 ```
@@ -172,11 +173,17 @@ Writes use a third frame type, `:W`, and that is CRLF terminated:
   +--------------- function 28, set battery capacity
 ```
 
-Firmware answers function 28 in one of two shapes, a return code of `0` in
-the second field, or a repeat of the command line. The integration accepts
-either and treats anything else as a failed write. Field 5 of the `:A` frame
-reports the stored capacity back, which is where **Capacity reported** comes
-from.
+The integration takes either of those replies as confirmation, and it also
+accepts a module that answers nothing at all as long as the next `:A` frame
+reports the new capacity. That read back is the stronger proof of the two, it
+is the same number **Capacity reported** shows, and it covers firmware that
+forwards a write in silence. When neither proof arrives the write is reported
+as failed, and the message quotes the lines the module did send.
+
+One trap worth knowing: protocol function `W21` is the under-voltage
+protection, **not** the Monitor function. The Monitor function is setting 21
+in the meter's own menu and can only be switched on from the meter's display,
+which is why the integration cannot enable it for you.
 
 ## Development
 

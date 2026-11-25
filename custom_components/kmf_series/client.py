@@ -42,7 +42,10 @@ MIN_ADDRESS = 1
 MAX_ADDRESS = 99
 DEFAULT_ADDRESS = 1
 DEFAULT_WRITE_TIMEOUT = 5.0
+MAX_DIAGNOSTIC_LINES = 3
+MAX_DIAGNOSTIC_LENGTH = 60
 
+READBACK = "readback"
 WRITE_REPLY_RE = re.compile(r"^:[wW](\d{2})=")
 
 OnDataCallback = Callable[[dict], None]
@@ -172,6 +175,8 @@ class KmfcClient:
         self._counters_interval = counters_interval
         self._write_timeout = write_timeout
         self._reply_waiter: asyncio.Future | None = None
+        self._frame_event: asyncio.Event | None = None
+        self._unparsed: list[str] = []
         self._on_data = on_data
         self._on_connection_change = on_connection_change
         self._writer: asyncio.StreamWriter | None = None
@@ -253,9 +258,12 @@ class KmfcClient:
                     text = line.decode("ascii", errors="replace")
                     data = parse_line(text)
                     if not data:
+                        self._note_unparsed(text)
                         self._dispatch_reply(text)
                         continue
                     self._last_frame.update(data)
+                    if self._frame_event is not None:
+                        self._frame_event.set()
                     if self._on_data is not None:
                         self._on_data(dict(self._last_frame))
         finally:
@@ -267,16 +275,27 @@ class KmfcClient:
     async def set_capacity(
         self, capacity_ah: int, address: int = DEFAULT_ADDRESS
     ) -> str:
-        """Write the battery capacity and wait for the device to confirm.
+        """Write the battery capacity and prove the meter stored it.
 
-        The write goes out on the connection the reader already owns, the
-        same way the vendor app writes over Bluetooth. The module answers a
-        write with ``:W28=<address>,<checksum>,<value>,``, so the reply is
-        matched on the function number and on the echoed value.
+        The write goes out on the connection the reader already owns. Two
+        kinds of proof are accepted, whichever arrives first:
 
-        Returns the reply line. Raises KmfcWriteError when the link is down,
-        the module stays silent or it echoes something else than what was
-        written.
+        1. A reply naming function 28, either a return code of ``0`` or a
+           repeat of the command with the value echoed back.
+        2. The next ``:A=`` frame, which carries the stored capacity in
+           field 5. The meter pushes those about every second, so a module
+           that forwards the write without echoing it is still confirmed,
+           and this is the same proof the read only sensor relies on.
+
+        Raises KmfcWriteError when the link is down, the meter refuses, or
+        nothing confirms the new value. The message carries whatever the
+        device did say, which is what tells a silent Monitor function apart
+        from a broken frame.
+
+        Raises KmfcWriteError when the link is down, the meter refuses, or
+        nothing confirms the new value. The message carries whatever the
+        device did say, which is what tells a silent Monitor function apart
+        from a broken frame.
         """
         writer = self._writer
         if writer is None:
@@ -284,31 +303,133 @@ class KmfcClient:
                 f"No open link to KM-F at {self.host}:{self.port}"
             )
         frame = build_set_capacity_frame(capacity_ah, address)
-        waiter: asyncio.Future = asyncio.get_running_loop().create_future()
+        wanted = capacity_ah * CAPACITY_PARAM_SCALE
+        already = self._reports_capacity(wanted)
+        loop = asyncio.get_running_loop()
+        waiter: asyncio.Future = loop.create_future()
+        self._frame_event = asyncio.Event()
         self._reply_waiter = waiter
+        self._unparsed = []
         try:
             try:
                 await self._send(writer, frame)
             except ConnectionError as err:
                 raise KmfcWriteError(str(err)) from err
-            try:
-                reply = await asyncio.wait_for(waiter, self._write_timeout)
-            except asyncio.TimeoutError as err:
-                raise KmfcWriteError(
-                    f"KM-F at {self.host}:{self.port} did not answer "
-                    f"{frame!r} within {self._write_timeout:g} s"
-                ) from err
+            deadline = loop.time() + self._write_timeout
+            outcome = await self._wait_for_proof(
+                waiter, wanted, already, deadline
+            )
+            if outcome is not None and outcome != READBACK:
+                if not reply_accepted(outcome, wanted):
+                    raise KmfcWriteError(
+                        f"KM-F at {self.host}:{self.port} refused the "
+                        f"capacity, it answered {outcome}"
+                    )
+                _LOGGER.debug("KM-F accepted %r with %r", frame, outcome)
+                return outcome
+            if outcome is None:
+                if already:
+                    # The meter held this value before the write, so a
+                    # matching frame would prove nothing and none came.
+                    note = (
+                        f"KM-F at {self.host}:{self.port} already reported "
+                        f"{capacity_ah} Ah and sent no reply to {frame!r}"
+                    )
+                    _LOGGER.debug("%s", note)
+                    return note
+                raise KmfcWriteError(self._silent_message(frame))
+            confirm = (
+                f"KM-F at {self.host}:{self.port} confirmed the capacity "
+                f"by reporting {capacity_ah} Ah back, without answering "
+                f"{frame!r}"
+            )
+            _LOGGER.debug("%s", confirm)
+            return confirm
+        except asyncio.TimeoutError as err:
+            raise KmfcWriteError(self._silent_message(frame)) from err
         finally:
             self._reply_waiter = None
+            self._frame_event = None
 
-        wanted = capacity_ah * CAPACITY_PARAM_SCALE
-        if not reply_accepted(reply, wanted):
-            raise KmfcWriteError(
-                f"KM-F at {self.host}:{self.port} refused the capacity, "
-                f"it answered {reply!r}"
+    async def _wait_for_proof(
+        self,
+        waiter: asyncio.Future,
+        wanted: int,
+        already: bool,
+        deadline: float,
+    ) -> str | None:
+        """First proof that arrived: a reply line, READBACK, or None.
+
+        Both proofs are watched at the same time so a module that stays
+        silent but obeys is not punished for it, and a module that answers
+        is not made to wait for the next frame. Every pushed frame carries
+        the capacity, so a frame reporting the written value is the read
+        back; frames that report something else are ignored until the
+        deadline. ``already`` skips that proof, the meter held the value
+        before the write so a matching frame would prove nothing.
+        """
+        loop = asyncio.get_running_loop()
+        event = self._frame_event
+        while True:
+            if not already and self._reports_capacity(wanted):
+                return READBACK
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return None
+            frame_seen = asyncio.ensure_future(event.wait())
+            done, _ = await asyncio.wait(
+                [waiter, frame_seen],
+                timeout=remaining,
+                return_when=asyncio.FIRST_COMPLETED,
             )
-        _LOGGER.debug("KM-F accepted %r with %r", frame, reply)
-        return reply
+            if waiter in done:
+                frame_seen.cancel()
+                return waiter.result()
+            if frame_seen in done:
+                event.clear()
+            else:
+                frame_seen.cancel()
+
+    def _reports_capacity(self, wanted: int) -> bool:
+        """True when the newest frame carries the capacity we just wrote."""
+        reported = self._last_frame.get("reported_capacity")
+        if reported is None:
+            return False
+        return round(float(reported) * CAPACITY_PARAM_SCALE) == wanted
+
+    def _silent_message(self, frame: bytes) -> str:
+        """Build the error shown when the meter neither answers nor obeys."""
+        detail = (
+            " The only lines it sent were: " + "; ".join(self._unparsed)
+            if self._unparsed
+            else ""
+        )
+        return (
+            f"KM-F at {self.host}:{self.port} neither answered {frame!r} "
+            f"nor changed the reported capacity within "
+            f"{self._write_timeout:g} s. The meter only accepts commands "
+            f"while its Monitor function is switched on, the same setting "
+            f"the vendor app needs to write, and its WiFi module serves "
+            f"one client at a time, so close that app first. See the "
+            f"KM-F manual, chapter \"Monitor function\".{detail}"
+        )
+
+    def _note_unparsed(self, line: str) -> None:
+        """Keep a short trail of what the device said that we did not know.
+
+        Only kept while a write is in flight, so a chatty or unfamiliar
+        firmware can be described in the error message instead of being
+        dropped silently.
+        """
+        if self._reply_waiter is None:
+            return
+        text = line.strip()
+        if not text or len(self._unparsed) >= MAX_DIAGNOSTIC_LINES:
+            return
+        if len(text) > MAX_DIAGNOSTIC_LENGTH:
+            text = text[:MAX_DIAGNOSTIC_LENGTH] + "..."
+        if text not in self._unparsed:
+            self._unparsed.append(text)
 
     def _dispatch_reply(self, line: str) -> None:
         """Hand a write reply to whoever is waiting for one."""

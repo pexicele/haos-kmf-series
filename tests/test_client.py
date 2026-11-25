@@ -23,6 +23,10 @@ reply_accepted = client_module.reply_accepted
 A_FRAME = b":A=4810,567,0,421,3986,100,\n"
 C_FRAME = b":C=12,41,\n"
 
+# Same frame with field 5 moved to 11000 tenths, the capacity a 1100 Ah
+# battery reports after a successful write.
+A_FRAME_1100 = b":A=4810,567,0,421,3986,11000,\n"
+
 # The documented frame for 200.0 Ah: :W28=1,216,2000,
 DOC_FRAME = b":W28=1,216,2000,\r\n"
 
@@ -196,7 +200,7 @@ async def test_set_capacity_round_trip() -> None:
 
 
 async def test_set_capacity_times_out() -> None:
-    """A module that never answers a write is reported as a failure."""
+    """A module that ignores the write is reported as a failure."""
 
     async def silent(reader, writer):
         writer.write(A_FRAME)
@@ -224,8 +228,65 @@ async def test_set_capacity_times_out() -> None:
                 await client.set_capacity(300)
             except KmfcWriteError as err:
                 print(f"ok   a silent device raises: {err}")
+                assert "Monitor function" in str(err), err
             else:
                 raise AssertionError("set_capacity should have raised")
+        finally:
+            await client.stop()
+            try:
+                await task
+            except (ConnectionError, KmfcConnectionError):
+                pass
+    server.close()
+    await server.wait_closed()
+
+
+async def test_write_without_reply_is_confirmed_by_the_meter() -> None:
+    """A module that forwards the write but never echoes still counts.
+
+    The command is documented over RS-485 and Bluetooth, so a WiFi module
+    that passes it through without answering is possible. The meter pushes
+    :A= frames every second, and the capacity in them proves the write
+    landed.
+    """
+
+    async def forward_only(reader, writer):
+        writer.write(A_FRAME)
+        await writer.drain()
+        stored = 100
+        try:
+            while True:
+                request = await reader.readuntil(b"\n")
+                if b":W28=" in request:
+                    # Accept the value but stay silent about it.
+                    stored = int(request.split(b",")[-2])
+                if b":A" in request:
+                    writer.write(f":A=4810,567,0,421,3986,{stored},\n".encode())
+                    await writer.drain()
+        except (ConnectionError, asyncio.IncompleteReadError):
+            pass
+        finally:
+            writer.close()
+
+    server = await asyncio.start_server(forward_only, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    client = KmfcClient(
+        "127.0.0.1",
+        port,
+        read_timeout=1.0,
+        counters_interval=0.3,
+        write_timeout=2.0,
+    )
+    async with server:
+        task = asyncio.create_task(client.listen())
+        try:
+            for _ in range(40):
+                await asyncio.sleep(0.05)
+                if client.connected:
+                    break
+            reply = await client.set_capacity(1100)
+            assert "1100 Ah" in reply, reply
+            print(f"ok   write without a reply confirmed by :A=: {reply}")
         finally:
             await client.stop()
             try:
