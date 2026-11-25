@@ -1,0 +1,78 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Configurare KM-F Series",
+        "description": "Introduceti adresa modulului WiFi KM-F.",
+        "data": {
+          "name": "Nume dispozitiv",
+          "host": "Adresa IP sau hostname",
+          "port": "Port TCP"
+        },
+        "data_description": {
+          "host": "Adresa IP sau hostname-ul modulului WiFi.",
+          "port": "Portul TCP al fluxului de date, 8899 la toate modelele."
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Fara date de la aceasta adresa. Verificati IP.",
+      "invalid_host": "Introduceti o adresa IP sau un hostname valid."
+    },
+    "abort": {
+      "already_configured": "Acest dispozitiv este deja configurat."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Optiuni KM-F Series",
+        "data": {
+          "update_interval": "Interval de actualizare"
+        },
+        "data_description": {
+          "update_interval": "Secunde intre cereri pentru contor."
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "voltage": {
+        "name": "Tensiune"
+      },
+      "current": {
+        "name": "Curent"
+      },
+      "power": {
+        "name": "Putere"
+      },
+      "state_of_charge": {
+        "name": "Grad de incarcare"
+      },
+      "remaining_capacity": {
+        "name": "Capacitate ramasa"
+      },
+      "set_capacity": {
+        "name": "Capacitate setata"
+      },
+      "time_remaining": {
+        "name": "Timp ramas"
+      },
+      "status": {
+        "name": "Stare",
+        "state": {
+          "charging": "Incarcare",
+          "discharging": "Descarcare",
+          "idle": "In gol"
+        }
+      },
+      "energy_charged": {
+        "name": "Energie incarcata"
+      },
+      "energy_discharged": {
+        "name": "Energie descarcata"
+      }
+    }
+  }
+}

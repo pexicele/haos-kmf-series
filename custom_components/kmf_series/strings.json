@@ -3,15 +3,75 @@
     "step": {
       "user": {
         "title": "Configure KM-F Series",
-        "description": "Set up your KM-F Series device integration"
+        "description": "Enter the address of the KM-F WiFi module.",
+        "data": {
+          "name": "Device name",
+          "host": "Host or IP address",
+          "port": "TCP port"
+        },
+        "data_description": {
+          "host": "IP or hostname of the WiFi module.",
+          "port": "TCP data port, 8899 on every KM-F model."
+        }
       }
+    },
+    "error": {
+      "cannot_connect": "No data from that address. Check IP, port.",
+      "invalid_host": "Enter a valid IP address or hostname."
+    },
+    "abort": {
+      "already_configured": "This device is already configured."
     }
   },
   "options": {
     "step": {
       "init": {
-        "title": "KM-F Series Options",
-        "description": "Configure polling interval and other settings"
+        "title": "KM-F Series options",
+        "data": {
+          "update_interval": "Update interval"
+        },
+        "data_description": {
+          "update_interval": "Seconds between energy counter reads."
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "voltage": {
+        "name": "Voltage"
+      },
+      "current": {
+        "name": "Current"
+      },
+      "power": {
+        "name": "Power"
+      },
+      "state_of_charge": {
+        "name": "State of charge"
+      },
+      "remaining_capacity": {
+        "name": "Remaining capacity"
+      },
+      "set_capacity": {
+        "name": "Set capacity"
+      },
+      "time_remaining": {
+        "name": "Time remaining"
+      },
+      "status": {
+        "name": "Status",
+        "state": {
+          "charging": "Charging",
+          "discharging": "Discharging",
+          "idle": "Idle"
+        }
+      },
+      "energy_charged": {
+        "name": "Energy charged"
+      },
+      "energy_discharged": {
+        "name": "Energy discharged"
       }
     }
   }

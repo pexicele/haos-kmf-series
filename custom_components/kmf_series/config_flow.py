@@ -1,60 +1,142 @@
-"""Config flow for KM-F Series integration."""
+"""Config flow for the KM-F Series integration."""
+
+from __future__ import annotations
+
+import logging
+import re
+from typing import Any
+
 import voluptuous as vol
-from homeassistant import config_entries
+from homeassistant.config_entries import (
+    ConfigEntry,
+    ConfigFlow,
+    ConfigFlowResult,
+    OptionsFlow,
+)
 from homeassistant.core import callback
+from homeassistant.helpers.selector import (
+    NumberSelector,
+    NumberSelectorConfig,
+    NumberSelectorMode,
+    TextSelector,
+)
 
-from . import DOMAIN
+from .client import DEFAULT_PORT, KmfcClient, KmfcConnectionError
+from .const import (
+    CONF_HOST,
+    CONF_NAME,
+    CONF_PORT,
+    DEFAULT_NAME,
+    DEFAULT_UPDATE_INTERVAL,
+    DOMAIN,
+    MAX_UPDATE_INTERVAL,
+    MIN_UPDATE_INTERVAL,
+    UPDATE_INTERVAL,
+)
 
+_LOGGER = logging.getLogger(__name__)
 
-class KMFSeriesConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
-    """Handle a config flow for KM-F Series."""
-    
-    VERSION = 1
-    
-    async def async_step_user(self, user_input=None):
-        """Handle the initial step."""
-        if user_input is not None:
-            return self.async_create_entry(
-                title=user_input.get("name", "KM-F Series"),
-                data=user_input,
+HOST_PATTERN = re.compile(
+    r"^(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}"
+    r"(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)$"
+    r"|^[A-Za-z0-9][A-Za-z0-9.-]{0,253}$"
+)
+
+STEP_USER = vol.Schema(
+    {
+        vol.Required(CONF_NAME, default=DEFAULT_NAME): TextSelector(),
+        vol.Required(CONF_HOST): TextSelector(),
+        vol.Optional(CONF_PORT, default=DEFAULT_PORT): NumberSelector(
+            NumberSelectorConfig(
+                min=1, max=65535, mode=NumberSelectorMode.BOX, step=1
             )
-        
-        data_schema = vol.Schema({
-            vol.Required("name", default="KM-F Series"): str,
-            vol.Required("host", default=""): str,
-            vol.Optional("port", default=8899): int,
-        })
-        
-        return self.async_show_form(
-            step_id="user",
-            data_schema=data_schema,
-        )
-    
+        ),
+    }
+)
+
+
+def valid_host(value: str) -> bool:
+    """Accept a dotted quad or a plain hostname."""
+    return bool(HOST_PATTERN.match(value.strip()))
+
+
+class KmfcConfigFlow(ConfigFlow, domain=DOMAIN):
+    """Handle the UI setup of a KM-F device."""
+
+    VERSION = 1
+
     @staticmethod
     @callback
-    def async_get_options_flow(config_entry):
-        """Get the options flow for this handler."""
-        return KMFSeriesOptionsFlow(config_entry)
+    def async_get_options_flow(
+        config_entry: ConfigEntry,
+    ) -> "KmfcOptionsFlow":
+        """Return the options handler for an existing entry."""
+        return KmfcOptionsFlow()
+
+    async def async_step_user(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Ask for the endpoint, then reach out to the device before saving."""
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            host = user_input[CONF_HOST].strip()
+            if not valid_host(host):
+                errors[CONF_HOST] = "invalid_host"
+            else:
+                await self.async_set_unique_id(host.lower())
+                self._abort_if_unique_id_configured(
+                    updates={
+                        CONF_HOST: host,
+                        CONF_PORT: user_input[CONF_PORT],
+                    }
+                )
+
+                client = KmfcClient(host, int(user_input[CONF_PORT]))
+                try:
+                    await client.probe()
+                except KmfcConnectionError as err:
+                    _LOGGER.debug("KM-F probe failed for %s: %s", host, err)
+                    errors["cannot_connect"] = "cannot_connect"
+                else:
+                    return self.async_create_entry(
+                        title=user_input.get(CONF_NAME) or DEFAULT_NAME,
+                        data={
+                            CONF_NAME: user_input.get(CONF_NAME)
+                            or DEFAULT_NAME,
+                            CONF_HOST: host,
+                            CONF_PORT: int(user_input[CONF_PORT]),
+                        },
+                    )
+
+        return self.async_show_form(
+            step_id="user", data_schema=STEP_USER, errors=errors
+        )
 
 
-class KMFSeriesOptionsFlow(config_entries.OptionsFlow):
-    """Handle options for KM-F Series."""
-    
-    def __init__(self, config_entry):
-        """Initialize options flow."""
-        self.config_entry = config_entry
-    
-    async def async_step_init(self, user_input=None):
-        """Handle the initial options step."""
+class KmfcOptionsFlow(OptionsFlow):
+    """Handle the options of an existing KM-F entry."""
+
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Let the user retune the polling cadence."""
         if user_input is not None:
             return self.async_create_entry(title="", data=user_input)
-        
-        return self.async_show_form(
-            step_id="init",
-            data_schema=vol.Schema({
-                vol.Optional(
-                    "scan_interval",
-                    default=self.config_entry.options.get("scan_interval", 30),
-                ): int,
-            }),
+
+        current = self.config_entry.options.get(
+            UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL
         )
+        schema = vol.Schema(
+            {
+                vol.Optional(UPDATE_INTERVAL, default=current): NumberSelector(
+                    NumberSelectorConfig(
+                        min=MIN_UPDATE_INTERVAL,
+                        max=MAX_UPDATE_INTERVAL,
+                        mode=NumberSelectorMode.BOX,
+                        step=1,
+                        unit_of_measurement="s",
+                    )
+                )
+            }
+        )
+        return self.async_show_form(step_id="init", data_schema=schema)

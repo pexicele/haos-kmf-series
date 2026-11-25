@@ -1,0 +1,56 @@
+name: Release
+
+# Builds a convenience zip for a manual install and attaches it to the
+# release. The Marketplace installs straight from the repository tree, it
+# does not need this asset, but a plain zip is handy for an offline host.
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the tag against manifest.json
+        run: |
+          MANIFEST=custom_components/kmf_series/manifest.json
+          VERSION=$(python3 -c \
+            'import json,sys;print(json.load(open(sys.argv[1]))["version"])' \
+            "$MANIFEST")
+          echo "manifest: $VERSION, tag: $GITHUB_REF_NAME"
+          if [ "v$VERSION" != "$GITHUB_REF_NAME" ]; then
+            echo "tag does not match the manifest version"
+            exit 1
+          fi
+
+      - name: Run the tests
+        run: |
+          python3 tests/test_parser.py
+          (cd tests && python3 test_client.py)
+          (cd tests && python3 test_integration.py)
+
+      - name: Build the artifact
+        run: |
+          rm -f kmf_series.zip
+          zip -qr kmf_series.zip custom_components/kmf_series \
+            -x "*__pycache__*"
+          unzip -l kmf_series.zip
+          ls -l kmf_series.zip
+
+      - name: Check the layout
+        run: |
+          if ! unzip -l kmf_series.zip \
+            | grep -q "custom_components/kmf_series/manifest.json"; then
+            echo "zip must keep the custom_components prefix"
+            exit 1
+          fi
+
+      - name: Attach to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: kmf_series.zip
