@@ -1,4 +1,4 @@
-"""Parsing of the Junctek KM-F ASCII stream.
+"""Parsing of the Junctek KM-F ASCII stream. By Pexic.
 
 This module is intentionally free of Home Assistant imports so it can be
 unit tested on its own (see tests/test_parser.py).

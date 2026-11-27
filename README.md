@@ -1,7 +1,7 @@
 # KM-F Series - Home Assistant integration
 
 Custom integration for the **Junctek KM-F Series** battery monitor (KM105F,
-KM140F and friends) with the built-in WiFi module.
+KM140F and friends) with the built-in WiFi module. By **Pexic**.
 
 ![KM-F device](assets/device.webp)
 
@@ -10,6 +10,11 @@ module pushes its measurement frame on its own, so the values land in Home
 Assistant as soon as the device sends them. Nothing goes out to the internet.
 
 ![Home Assistant dashboard](assets/dashboard.png)
+
+## About
+
+Maintained by **Pexic** (`@pexicele`). The integration talks to the
+meter's local WiFi module and nothing leaves your network.
 
 ## Sensors
 
@@ -195,10 +200,16 @@ against a plain CPython with a stand-in for the Home Assistant API.
 
 ## Credits
 
-The frame layout was worked out from the public KM-F reports and from
-`Barlows/ha-addon-km140f` (MIT). The write frames, function numbers and the
-checksum rule come from the Juntek KG-F manual and from the community
-code of pljakobs/JuncTek_Batterymonitor.
+The integration is by **Pexic** (`@pexicele`). The frame layout was worked out
+from the public KM-F reports and from `Barlows/ha-addon-km140f` (MIT).
+The write frames, function numbers and the checksum rule come from the
+Juntek KG-F manual and from the community code of
+pljakobs/JuncTek_Batterymonitor.
+
+## Changelog
+
+- **2.1.5** - the integration is maintained by **Pexic**; the device page
+  shows **by Pexic** instead of **by Junctek**. Read-only behaviour unchanged.
 
 ## License
 

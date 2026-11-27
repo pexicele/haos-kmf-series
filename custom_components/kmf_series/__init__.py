@@ -1,4 +1,4 @@
-"""Custom Home Assistant integration for the Junctek KM-F Series."""
+"""Custom Home Assistant integration for the Junctek KM-F Series. By Pexic."""
 
 from __future__ import annotations
 

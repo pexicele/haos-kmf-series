@@ -1,4 +1,4 @@
-"""Asyncio TCP client for the Junctek KM-F WiFi module.
+"""Asyncio TCP client for the Junctek KM-F WiFi module. By Pexic.
 
 The module does not answer a request/response exchange in a useful way: it
 pushes :A= frames on its own and only emits :C= totals when it is asked. The
