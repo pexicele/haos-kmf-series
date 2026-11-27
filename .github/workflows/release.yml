@@ -3,10 +3,14 @@ name: Release
 # Builds a convenience zip for a manual install and attaches it to the
 # release. The Marketplace installs straight from the repository tree, it
 # does not need this asset, but a plain zip is handy for an offline host.
+#
+# Triggered by the v* tag push. The workflow creates the release itself
+# (softprops/action-gh-release does this when no release exists yet), so a
+# push of a v* tag publishes the release end to end.
 
 on:
-  release:
-    types: [published]
+  push:
+    tags: ["v*"]
 
 jobs:
   build:
@@ -53,7 +57,12 @@ jobs:
             exit 1
           fi
 
-      - name: Attach to the release
+      - name: Create or update the release and attach the zip
         uses: softprops/action-gh-release@v2
         with:
+          name: "Version ${{ github.ref_name }}"
+          body: |
+            See the commit for details: https://github.com/${{ github.repository }}/commit/${{ github.sha }}
           files: kmf_series.zip
+          draft: false
+          prerelease: false
